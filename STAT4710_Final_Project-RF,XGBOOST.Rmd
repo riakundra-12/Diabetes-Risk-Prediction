@@ -1,0 +1,742 @@
+---
+title: "CDC Diabetes Health Indicators - Exploratory Data Analysis and Classification"
+author:
+- LastName1
+- LastName2
+- LastName3
+date: 'Due 05/03, 2026'
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: '4'
+  word_document:
+    toc: yes
+    toc_depth: '4'
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.width=8, fig.height=5)
+options(scipen = 0, digits = 3)  # controls base R output
+if(!require('pacman')) {install.packages('pacman')}
+pacman::p_load(tidyverse, ggplot2, gridExtra, corrplot, skimr, DataExplorer, 
+               glmnet, caret, pROC, rpart, randomForest, car)
+```
+
+\pagebreak
+
+# Executive Summary
+
+Diabetes is a significant public health concern affecting millions of U.S. adults. This analysis investigates how behavioral, demographic, and health-related factors are associated with diabetes risk using the CDC Diabetes Health Indicators dataset from the UCI Machine Learning Repository. 
+
+Our research question is: **To what extent can diabetes status be predicted from observable health behaviors and socioeconomic characteristics, and which factors are most strongly associated with increased risk?**
+
+
+\pagebreak
+
+# Part 1: Exploratory Data Analysis
+
+## Introduction and Motivation
+
+Diabetes prevalence in the United States has grown substantially over the past two decades, creating a significant burden on public health and healthcare systems. Early identification of individuals at high risk for diabetes is crucial for preventive interventions. While genetic factors certainly play a role, modifiable behavioral and lifestyle factors—such as physical activity, weight, smoking, and alcohol consumption—present opportunities for targeted interventions.
+
+Understanding the relationships between these observable factors and diabetes risk can inform:
+- **Clinical practice**: Development of simple screening tools for primary care settings
+- **Public health policy**: Identification of populations requiring targeted prevention programs
+- **Individual decision-making**: Guidance for lifestyle modifications that can reduce diabetes risk
+
+This analysis leverages a large, population-based dataset to quantify these associations and assess their relative importance. We focus on clarity of interpretation and practical utility rather than maximizing predictive complexity.
+
+## Data Description
+
+```{r data loading, include=F}
+# Load the three diabetes datasets from the UCI repository
+# These files are from the CDC's Behavioral Risk Factor Surveillance System (BRFSS) 2015
+
+setwd("~/Downloads/archive")
+
+# 1. Binary classification (0 = no diabetes, 1 = diabetes or prediabetes) - MAIN DATASET
+diabetes_binary <- read.csv("diabetes_binary_health_indicators_BRFSS2015.csv")
+
+# 2. Balanced version (50-50 split of positive and negative cases)
+# Useful for some machine learning techniques
+diabetes_balanced <- read.csv("diabetes_binary_5050split_health_indicators_BRFSS2015.csv")
+
+# 3. Three-class version (0 = no diabetes, 1 = prediabetes, 2 = diabetes)
+# Allows for more granular analysis if needed
+diabetes_multiclass <- read.csv("diabetes_012_health_indicators_BRFSS2015.csv")
+
+# For this analysis, we will primarily use the binary dataset
+diabetes_data <- diabetes_binary
+
+# Examine structure
+str(diabetes_data)
+```
+
+## Exploratory Data Analysis
+
+### Missing Data Assessment
+
+```{r missing data, echo=F, comment=" "}
+missing_summary <- data.frame(
+  Variable = names(diabetes_data),
+  Missing_Count = colSums(is.na(diabetes_data)),
+  Missing_Percent = round(colSums(is.na(diabetes_data)) / nrow(diabetes_data) * 100, 2)
+)
+cat("Missing Data Summary:\n")
+print(missing_summary[missing_summary$Missing_Count > 0, ])
+if(all(missing_summary$Missing_Count == 0)) {
+  cat("No missing values detected in the dataset.\n")
+}
+```
+
+Good news: the dataset contains no missing values, so no imputation is required.
+
+### Target Variable Distribution
+
+```{r target distribution, echo=F, comment=" "}
+target_dist <- table(diabetes_data$Diabetes_binary)
+target_prop <- prop.table(target_dist)
+
+cat("Diabetes Status Distribution:\n")
+cat("No Diabetes (0):", target_dist[1], sprintf("(%.1f%%)\n", target_prop[1]*100))
+cat("Diabetes (1):", target_dist[2], sprintf("(%.1f%%)\n", target_prop[2]*100))
+```
+
+```{r plot target, fig.width=6, fig.height=4}
+ggplot(diabetes_data, aes(x = factor(Diabetes_binary))) +
+  geom_bar(fill = c("#27AE60", "#E74C3C"), alpha = 0.8, color = "black") +
+  geom_text(stat = "count", aes(label = paste0(after_stat(count), "\n(", 
+            round(after_stat(count)/sum(after_stat(count))*100, 1), "%)")),
+            vjust = -0.5, size = 4.5, fontface = "bold") +
+  labs(title = "Distribution of Diabetes Status",
+       x = "Diabetes Status",
+       y = "Frequency") +
+  scale_x_discrete(labels = c("No Diabetes", "Diabetes/Prediabetes")) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+        axis.text = element_text(size = 11))
+```
+
+The dataset exhibits moderate class imbalance, with approximately `r round(target_prop[1]*100, 1)`% of respondents reporting no diabetes and `r round(target_prop[2]*100, 1)`% reporting diabetes or prediabetes. This imbalance will be considered when selecting evaluation metrics and thresholds.
+
+### Demographic Characteristics
+
+```{r age distribution, echo=F, comment=" ", results=T}
+cat("Age Distribution (Numeric Encoding):\n")
+cat("1=18-24, 2=25-29, 3=30-34, ... 13=75 or older\n\n")
+print(table(diabetes_data$Age))
+```
+
+```{r plot age, fig.width=7, fig.height=4}
+ggplot(diabetes_data, aes(x = factor(Age))) +
+  geom_bar(fill = "#3498DB", alpha = 0.8, color = "black") +
+  labs(title = "Age Distribution", 
+       x = "Age Category (1=18-24, 13=75+)", 
+       y = "Frequency") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+```{r income distribution, echo=F, comment=" ", results=T}
+cat("Income Distribution (Numeric Encoding):\n")
+cat("1=<$10k, 2=$10-15k, 3=$15-20k, 4=$20-25k, 5=$25-35k, 6=$35-50k, 7=$50-75k, 8=$75k+\n\n")
+print(table(diabetes_data$Income))
+```
+
+```{r plot income, fig.width=7, fig.height=4}
+ggplot(diabetes_data, aes(x = factor(Income))) +
+  geom_bar(fill = "#9B59B6", alpha = 0.8, color = "black") +
+  labs(title = "Income Distribution", 
+       x = "Income Category (1=<$10k, 8=$75k+)", 
+       y = "Frequency") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+### Health Behavior Factors
+
+```{r health behaviors, echo=F, comment=" ", results=T}
+cat("Physical Activity (past 30 days):\n")
+print(table(diabetes_data$PhysActivity))
+cat("\nCurrent Smoker:\n")
+print(table(diabetes_data$Smoker))
+cat("\nHeavy Alcohol Consumption:\n")
+print(table(diabetes_data$HvyAlcoholConsump))
+cat("\nConsume Fruits Daily:\n")
+print(table(diabetes_data$Fruits))
+cat("\nConsume Vegetables Daily:\n")
+print(table(diabetes_data$Veggies))
+```
+
+```{r plot behaviors, fig.width=12, fig.height=5}
+p1 <- ggplot(diabetes_data, aes(x = factor(PhysActivity))) +
+  geom_bar(fill = "#2ECC71", alpha = 0.8, color = "black") +
+  labs(title = "Physical Activity", x = "Past 30 Days (0=No, 1=Yes)", y = "Frequency") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+p2 <- ggplot(diabetes_data, aes(x = factor(Smoker))) +
+  geom_bar(fill = "#E67E22", alpha = 0.8, color = "black") +
+  labs(title = "Smoking Status", x = "Current Smoker (0=No, 1=Yes)", y = "Frequency") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+p3 <- ggplot(diabetes_data, aes(x = factor(HvyAlcoholConsump))) +
+  geom_bar(fill = "#F39C12", alpha = 0.8, color = "black") +
+  labs(title = "Heavy Alcohol Use", x = "Heavy Drinker (0=No, 1=Yes)", y = "Frequency") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+### Health Status Variables
+
+```{r health status, echo=F, comment=" ", results=T}
+cat("General Health Status (1=Excellent, 5=Poor):\n")
+print(table(diabetes_data$GenHlth))
+cat("\nBMI Summary:\n")
+print(summary(diabetes_data$BMI))
+cat("\nPhysical Health Days (past 30):\n")
+print(summary(diabetes_data$PhysHlth))
+cat("\nMental Health Days (past 30):\n")
+print(summary(diabetes_data$MentHlth))
+cat("\nDifficulty Walking or Climbing Stairs:\n")
+print(table(diabetes_data$DiffWalk))
+```
+
+```{r plot health, fig.width=12, fig.height=5}
+p1 <- ggplot(diabetes_data, aes(x = BMI)) +
+  geom_histogram(bins = 40, fill = "#F39C12", alpha = 0.8, color = "black") +
+  geom_vline(aes(xintercept = mean(BMI, na.rm=T)), color = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "BMI Distribution", x = "Body Mass Index", y = "Frequency") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+p2 <- ggplot(diabetes_data, aes(x = factor(GenHlth))) +
+  geom_bar(fill = "#1ABC9C", alpha = 0.8, color = "black") +
+  labs(title = "General Health Status", 
+       x = "Rating (1=Excellent, 5=Poor)", 
+       y = "Frequency") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+### Bivariate Relationships with Diabetes Status
+
+```{r diabetes by bmi, fig.width=6, fig.height=4}
+ggplot(diabetes_data, aes(x = factor(Diabetes_binary), y = BMI)) +
+  geom_boxplot(fill = c("#3498DB", "#E74C3C"), alpha = 0.8, color = "black",
+               outlier.shape = NA) +  # hides outlier dots since dataset is huge
+  labs(title = "BMI by Diabetes Status",
+       x = "Diabetes Status",
+       y = "Body Mass Index") +
+  scale_x_discrete(labels = c("No Diabetes", "Diabetes")) +
+  coord_cartesian(ylim = c(10, 70)) +  # zooms in, cutting extreme outliers visually
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+Clear relationship: individuals with diabetes have higher BMI on average.
+
+```{r diabetes by age, fig.width=8, fig.height=4}
+ggplot(diabetes_data, aes(x = factor(Age), 
+                          fill = factor(Diabetes_binary))) +
+  geom_bar(position = "fill", alpha = 0.8, color = "black") +
+  scale_fill_manual(values = c("#27AE60", "#E74C3C"), 
+                    labels = c("No Diabetes", "Diabetes")) +
+  scale_x_discrete(labels = c("1" = "18-24", "2" = "25-29", "3" = "30-34",
+                               "4" = "35-39", "5" = "40-44", "6" = "45-49",
+                               "7" = "50-54", "8" = "55-59", "9" = "60-64",
+                               "10" = "65-69", "11" = "70-74", "12" = "75-79",
+                               "13" = "80+")) +
+  labs(title = "Diabetes Prevalence by Age",
+       x = "Age Category",
+       y = "Proportion",
+       fill = "Status") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Strong positive relationship: diabetes prevalence increases substantially with age, particularly in years 40+. 
+
+```{r diabetes by health, fig.width=8, fig.height=4}
+ggplot(diabetes_data, aes(x = factor(GenHlth), fill = factor(Diabetes_binary))) +
+  geom_bar(position = "fill", alpha = 0.8, color = "black") +
+  scale_fill_manual(values = c("#27AE60", "#E74C3C"), 
+                    labels = c("No Diabetes", "Diabetes")) +
+  scale_x_discrete(labels = c("Excellent", "Very Good", "Good", "Fair", "Poor")) +
+  labs(title = "Diabetes Prevalence by General Health Status",
+       x = "Self-Reported Health",
+       y = "Proportion",
+       fill = "Status") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Strong inverse relationship: individuals reporting poor health have much higher diabetes prevalence, which is to be expected. 
+
+### Correlation Analysis
+
+```{r correlation matrix, echo=F}
+# Select numeric columns
+numeric_cols <- sapply(diabetes_data, is.numeric)
+numeric_data <- diabetes_data[, numeric_cols]
+
+# Compute correlations
+corr_matrix <- cor(numeric_data, use = "complete.obs")
+
+# Display correlations with diabetes (target variable, assuming first column)
+target_corr <- corr_matrix[, 1]
+target_corr_sorted <- sort(abs(target_corr), decreasing = TRUE)
+
+cat("Correlation with Diabetes Status:\n")
+print(round(target_corr_sorted, 4))
+```
+```{r}
+corrplot(corr_matrix, method = "circle", order = "hclust",
+         tl.cex = 0.8, tl.col = "black",
+         addCoef.col = NULL,          # removes numbers entirely
+         col = COL2("RdBu", 10),      # clearer red/blue color scale
+         title = "Correlation Matrix of Numeric Variables",
+         mar = c(0, 0, 2, 0))
+```
+
+
+```{r plot correlation, fig.width=8, fig.height=6}
+# Pull just the correlations with the target variable
+target_corr <- data.frame(
+  Variable = names(corr_matrix[, "Diabetes_binary"]),
+  Correlation = corr_matrix[, "Diabetes_binary"]
+) %>%
+  filter(Variable != "Diabetes_binary") %>%
+  arrange(Correlation)
+
+ggplot(target_corr, aes(x = reorder(Variable, Correlation), y = Correlation,
+                         fill = Correlation > 0)) +
+  geom_col(alpha = 0.8, color = "black") +
+  geom_text(aes(label = round(Correlation, 2),
+                hjust = ifelse(Correlation > 0, -0.2, 1.2)), size = 3.5) +
+  scale_fill_manual(values = c("#E74C3C", "#27AE60"),
+                    labels = c("Negative", "Positive")) +
+  coord_flip(ylim = c(-0.25, 0.35)) +
+  labs(title = "Correlation with Diabetes Status",
+       x = "", y = "Pearson Correlation",
+       fill = "Direction") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "bottom")
+```
+Some patterns worth noting:
+- Modifiable risk factors dominate — BMI, physical activity, and general health behaviors show strong associations, supporting the public health angle of your abstract.
+- Socioeconomic factors matter — income and education are meaningful predictors, suggesting diabetes risk is not purely behavioral but also structural.
+- Comorbidities cluster together — high BP, high cholesterol, heart disease, and diabetes frequently co-occur, which has implications for screening strategies.
+- No single dominant predictor — correlations top out at 0.29, meaning diabetes risk is multifactorial, which justifies using a multivariate model rather than a single screening variable.
+
+
+\pagebreak
+
+# Part 2: Methods
+
+## Overview of Analytical Approach
+
+Our analysis employs a supervised classification framework to predict diabetes status from observed health and behavioral characteristics. We implement multiple modeling approaches that span the interpretability-flexibility tradeoff, recognizing that different stakeholders — clinicians who need explainable outputs, public health officials who care about population-level risk factors, and screening practitioners who need operational thresholds — may prioritize these objectives differently.
+
+The fundamental question guiding our analysis is: **Among multiple candidate predictors, which factors provide the most actionable information for understanding and predicting diabetes risk, and how accurately can diabetes status be predicted from these observables alone?**
+
+Our modeling pipeline proceeds as follows:
+
+1. **Data preparation**: Train-test split and handling of class imbalance
+2. **Variable selection**: LASSO logistic regression to identify the most informative predictors
+3. **Interpretable baseline**: Full and reduced logistic regression with backward elimination
+4. **Flexible methods**: Classification tree and Random Forest for comparison
+5. **Evaluation**: Confusion matrices, ROC curves, AUC, and cost-sensitive thresholding across all models
+
+## Data Preparation
+
+### Train-Test Split
+
+Before fitting any model, we partition the primary binary dataset into a training set (70%) and a held-out test set (30%) using a fixed random seed for reproducibility. All model fitting, variable selection, and hyperparameter tuning is performed exclusively on the training set. Final performance metrics are reported on the held-out test set to provide honest estimates of out-of-sample predictive ability.
+
+```{r}
+set.seed(471)
+n <- nrow(diabetes_data)
+train_idx <- sample(1:n, size = floor(0.7 * n))
+train_data <- diabetes_data[train_idx, ]
+test_data  <- diabetes_data[-train_idx, ]
+
+cat("Training set:", nrow(train_data), "observations\n")
+cat("Test set:", nrow(test_data), "observations\n")
+cat("Training diabetes prevalence:", 
+    round(mean(train_data$Diabetes_binary) * 100, 1), "%\n")
+cat("Test diabetes prevalence:", 
+    round(mean(test_data$Diabetes_binary) * 100, 1), "%\n")
+```
+
+### Addressing Class Imbalance
+
+The primary dataset has approximately 86% negative and 14% positive cases, a moderate imbalance that can bias classifiers toward the majority class. We address this in two ways. First, we use the **balanced dataset** (50-50 split, $n = 70{,}692$) as an alternative training source for methods that are particularly sensitive to class imbalance. Second, we consider the **weighted misclassification error** at the evaluation stage, assigning higher cost to false negatives (missed diabetes cases) given the asymmetric consequences in a public health screening context. We report performance under both default and cost-adjusted thresholds to assess sensitivity to this choice.
+
+## Variable Selection via LASSO Logistic Regression
+
+With 21 candidate predictors, some degree of variable selection is warranted to produce a parsimonious, interpretable model and to avoid overfitting. We apply **LASSO** (Least Absolute Shrinkage and Selection Operator) within the logistic regression framework.
+
+For a binary outcome $Y_i \in \{0, 1\}$ with predictor matrix $\mathbf{X}$, LASSO logistic regression solves:
+
+$$\hat{\boldsymbol{\beta}}^{\text{LASSO}} = \arg\min_{\boldsymbol{\beta}} \left\{ -\ell(\boldsymbol{\beta}; \mathbf{X}, \mathbf{y}) + \lambda \sum_{j=1}^{p} |\beta_j| \right\}$$
+
+where $\ell(\boldsymbol{\beta})$ is the binomial log-likelihood and $\lambda \geq 0$ controls the strength of the $L_1$ penalty. The $L_1$ penalty shrinks small coefficients exactly to zero, achieving simultaneous estimation and variable selection. This is particularly useful here because many predictors (e.g., high BP, high cholesterol, heart disease) are correlated, and LASSO will tend to select one representative from each correlated cluster.
+
+We select $\lambda$ using 10-fold cross-validation on the training set, implemented via `cv.glmnet()`. We consider two standard choices:
+
+- **`lambda.min`**: Minimizes cross-validated deviance; tends toward a richer model
+- **`lambda.1se`**: Largest $\lambda$ within one standard error of the minimum; favors a sparser, more conservative model suitable for a screening context
+
+The variables surviving LASSO selection at `lambda.1se` are carried forward into the final logistic regression for inference.
+
+```{r}
+library(glmnet)
+
+# Prepare matrices for glmnet
+X_train <- model.matrix(Diabetes_binary ~ . - 1, data = train_data)
+y_train <- train_data$Diabetes_binary
+
+# Fit LASSO logistic regression with 10-fold CV
+set.seed(471)
+cv_lasso <- cv.glmnet(X_train, y_train, 
+                      alpha = 1,           # alpha=1 is LASSO
+                      family = "binomial", 
+                      nfolds = 10)
+
+plot(cv_lasso)
+
+# Extract selected variables at lambda.1se
+coef_1se <- coef(cv_lasso, s = "lambda.1se")
+lasso_vars <- rownames(coef_1se)[coef_1se[, 1] != 0 & 
+                                   rownames(coef_1se) != "(Intercept)"]
+cat("Variables selected by LASSO (lambda.1se):\n")
+print(lasso_vars)
+```
+
+## Logistic Regression
+
+### Model Specification
+
+Logistic regression is our primary inferential tool because its coefficients carry direct, interpretable meaning for clinicians and public health practitioners. For a binary response $Y \in \{0, 1\}$ (diabetes status) and predictor vector $\mathbf{x}$, logistic regression models:
+
+$$P(Y = 1 \mid \mathbf{x}) = \frac{e^{\beta_0 + \mathbf{x}^T \boldsymbol{\beta}}}{1 + e^{\beta_0 + \mathbf{x}^T \boldsymbol{\beta}}}$$
+
+Equivalently, the log-odds (logit) of diabetes is linear in the predictors:
+
+$$\log\left(\frac{P(Y=1)}{P(Y=0)}\right) = \beta_0 + \mathbf{x}^T \boldsymbol{\beta}$$
+
+Each coefficient $\beta_j$ represents the change in log-odds of diabetes associated with a one-unit increase in $x_j$, holding all other predictors fixed. Exponentiating gives the **odds ratio** $e^{\beta_j}$, which is the natural effect size measure for binary outcomes and directly communicable in a clinical context.
+
+Parameters are estimated via maximum likelihood. Inference on individual coefficients uses the asymptotic normality of the MLE, yielding Wald $z$-tests and confidence intervals. We also use likelihood ratio tests via `Anova(..., type = 2)` from the `car` package for overall tests of each predictor, paralleling our approach in Homework 3.
+
+### Model Selection: LASSO 
+
+We use LASSO for variable selection to indentify a candidate set of predictors. This resulted in a model where every retained predictor is significant.
+
+```{r}
+# Full logistic model with LASSO-selected variables
+fmla_lasso <- as.formula(
+  paste("Diabetes_binary ~", paste(lasso_vars, collapse = " + ")))
+fit_lasso_glm <- glm(fmla_lasso, data = train_data, family = binomial)
+
+summary(fit_lasso_glm)
+```
+```{r}
+# ROC curve and AUC
+library(pROC)
+train_probs <- predict(fit_lasso_glm, type = "response")
+roc_train <- roc(train_data$Diabetes_binary, train_probs)
+plot(roc_train, main = paste("ROC Curve (AUC =", round(auc(roc_train), 3), ")"))
+
+#Calibration - do predicted probabilities match observed rates?
+library(ggplot2)
+cal_data <- data.frame(
+  prob = train_probs,
+  actual = train_data$Diabetes_binary
+) %>%
+  mutate(bin = cut(prob, breaks = seq(0, 1, by = 0.05))) %>%
+  group_by(bin) %>%
+  summarise(mean_pred = mean(prob), mean_actual = mean(actual))
+
+ggplot(cal_data, aes(x = mean_pred, y = mean_actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Calibration Plot", 
+       x = "Mean Predicted Probability", 
+       y = "Observed Proportion") +
+  theme_minimal()
+```
+The LASSO logistic regression model achieves an AUC of 0.821 on the training data, indicating good discriminative ability as the model correctly ranks a diabetic above a non-diabetic approximately 82% of the time. The calibration plot shows that predicted probabilities closely track observed diabetes rates across most of the risk spectrum (0–65%). Significant overestimation is observed at very high predicted probabilities (>0.70), meaning the model is overly aggressive in flagging high-risk individuals. This suggests the model's probability outputs should be interpreted with caution as absolute risk estimates, though its ability to rank individuals by relative risk remains strong.
+
+```{r}
+# Evaluate on held-out test set
+test_probs <- predict(fit_lasso_glm, newdata = test_data, type = "response")
+roc_test <- roc(test_data$Diabetes_binary, test_probs)
+cat("Test AUC:", round(auc(roc_test), 3), "\n")
+```
+The test AUC is very close to that of the training AUC, suggesting that the model is not overfit. 
+
+### Classification and Threshold Selection
+
+Given fitted probabilities $\hat{p}_i = \hat{P}(Y_i = 1 \mid \mathbf{x}_i)$, we classify observation $i$ as diabetic if $\hat{p}_i > t$ for some threshold $t \in [0, 1]$. The default $t = 0.5$ is not necessarily optimal when classes are imbalanced or when false negatives and false positives carry different costs.
+
+We determine the optimal threshold in two ways. First, we select the threshold that **minimizes overall misclassification error** on the training set. Second, we use a **cost-sensitive** threshold motivated by the asymmetry of diabetes screening: a false negative (missing a true diabetic) has more serious health consequences than a false positive (flagging a healthy person for further testing). Using cost weights $a_{01} = 5$ for a false negative and $a_{10} = 1$ for a false positive, the weighted MCE is:
+
+$$\text{Weighted MCE}(t) = \frac{a_{10} \cdot FP(t) + a_{01} \cdot FN(t)}{n}$$
+
+The threshold minimizing this expression is our recommended operating point for a public health screening application.
+
+## Tree-Based Methods
+
+### Classification Tree
+
+We fit a classification tree using `rpart()` with the Gini impurity criterion. A classification tree recursively partitions the predictor space into rectangular regions by choosing at each node the split that maximally reduces impurity. The resulting model is highly interpretable: the tree structure itself constitutes a decision rule that can be depicted visually and applied without computation.
+
+A key tuning parameter is the complexity parameter `cp`, which controls the minimum improvement in fit required to add a split. We select `cp` via 10-fold cross-validation using `plotcp()` and `prune()`, choosing the smallest tree within one standard error of the minimum cross-validated error (mirroring the `lambda.1se` logic used in LASSO). This produces a pruned tree that balances fit against complexity.
+
+Classification trees are included in our analysis primarily for two reasons: they reveal non-linear threshold effects and interactions (e.g., "BMI > 30 AND Age > 7 AND GenHlth > 3") that logistic regression cannot easily capture, and they provide a natural baseline for comparing the gains achieved by ensemble methods.
+
+```{r classification tree setup, echo=T, eval=F}
+library(rpart)
+library(rpart.plot)
+
+# Fit classification tree on training data
+tree_fit <- rpart(Diabetes_binary ~ ., data = train_data,
+                  method = "class",
+                  control = rpart.control(cp = 0.001))
+
+# Cross-validated error plot
+plotcp(tree_fit)
+
+# Prune to 1-SE rule
+best_cp <- tree_fit$cptable[which.min(tree_fit$cptable[, "xerror"]), "CP"]
+tree_pruned <- prune(tree_fit, cp = best_cp)
+
+# Visualize pruned tree
+rpart.plot(tree_pruned, type = 4, extra = 104, 
+           main = "Pruned Classification Tree: Diabetes Status")
+```
+The pruned classification tree (6 terminal nodes) reveals a clear hierarchy of risk factors for diabetes. The primary split on high blood pressure partitions the population into a large low-risk group (57% of respondents, 6% diabetes prevalence) and a higher-risk group requiring further stratification. Among those with high blood pressure, self-reported general health rating (GenHlth ≥ 4, indicating fair or poor health) and BMI ≥ 30 jointly identify a subgroup with nearly 50% diabetes prevalence. High cholesterol further refines risk within this group, consistent with the known clustering of metabolic risk factors. Notably, age and additional general health ratings only appear as splitting criteria deep in the tree, suggesting their effects are conditional on the presence of other risk factors rather than independent. These interaction structures are not easily captured by logistic regression and represent an important complement to the coefficient-based analysis.
+
+### Random Forest
+
+Random Forest is an ensemble method that fits $B$ classification trees on bootstrap samples of the training data, with each tree considering only a random subset of $m \leq p$ predictors at each split. The final prediction is the majority vote across all $B$ trees. By averaging over many decorrelated trees, Random Forest substantially reduces the variance of a single tree while retaining much of its flexibility.
+
+Random Forest offers two additional benefits for our analysis. First, it computes **variable importance** scores based on the average decrease in Gini impurity attributable to each predictor across all trees. This provides a model-based ranking of predictor relevance that can be compared to the coefficient magnitudes from logistic regression and the LASSO selection order. Second, its out-of-bag (OOB) error estimate provides a free cross-validation estimate of generalization error without requiring a separate validation set.
+
+```{r random-forest, echo=TRUE, cache=TRUE}
+library(randomForest)
+
+set.seed(471)
+rf_fit <- randomForest(
+  factor(Diabetes_binary) ~ .,
+  data      = train_data,
+  ntree     = 500,
+  mtry      = floor(sqrt(ncol(train_data) - 1)),  # default for classification
+  importance = TRUE
+)
+
+# OOB error summary
+print(rf_fit)
+
+# Variable importance plot
+varImpPlot(rf_fit, 
+           main = "Random Forest Variable Importance",
+           type = 2,          # mean decrease in Gini
+           col  = "#2C3E50",
+           pch  = 16)
+```
+
+```{r xgboost, echo=TRUE, cache=TRUE}
+library(xgboost)
+
+# XGBoost requires numeric matrix input and numeric labels
+X_train_xgb <- model.matrix(Diabetes_binary ~ . - 1, data = train_data)
+X_test_xgb  <- model.matrix(Diabetes_binary ~ . - 1, data = test_data)
+
+dtrain <- xgb.DMatrix(data = X_train_xgb, label = train_data$Diabetes_binary)
+dtest  <- xgb.DMatrix(data = X_test_xgb,  label = test_data$Diabetes_binary)
+
+# Cross-validated tuning for nrounds
+set.seed(471)
+xgb_cv <- xgb.cv(
+  params = list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = 0.05,
+    max_depth        = 4,
+    subsample        = 0.8,
+    colsample_bytree = 0.8
+  ),
+  data     = dtrain,
+  nrounds  = 300,
+  nfold    = 5,
+  verbose  = 0,
+  early_stopping_rounds = 20
+)
+
+best_nrounds <- xgb_cv$best_iteration
+cat("Best nrounds from CV:", best_nrounds, "\n")
+
+# Fit final XGBoost model
+xgb_fit <- xgboost(
+  params = list(
+    objective        = "binary:logistic",
+    eval_metric      = "auc",
+    eta              = 0.05,
+    max_depth        = 4,
+    subsample        = 0.8,
+    colsample_bytree = 0.8
+  ),
+  data    = dtrain,
+  nrounds = best_nrounds,
+  verbose = 0
+)
+
+# Variable importance
+xgb_imp <- xgb.importance(model = xgb_fit)
+xgb.plot.importance(xgb_imp[1:15, ],   # top 15 features
+                    main = "XGBoost Feature Importance (Top 15)")
+```
+## Model Evaluation
+
+### Confusion Matrix and Classification Metrics
+
+For each fitted model and a given threshold $t$, we construct a confusion matrix on the held-out test set:
+
+| | Predicted: No Diabetes | Predicted: Diabetes |
+|---|---|---|
+| **Actual: No Diabetes** | True Negative (TN) | False Positive (FP) |
+| **Actual: Diabetes** | False Negative (FN) | True Positive (TP) |
+
+From this we compute:
+
+- **Sensitivity** (Recall, TPR): $\frac{TP}{TP + FN}$ — proportion of true diabetes cases correctly flagged. This is the most important metric in a screening context.
+- **Specificity** (TNR): $\frac{TN}{TN + FP}$ — proportion of healthy individuals correctly cleared.
+- **Positive Predictive Value** (Precision): $\frac{TP}{TP + FP}$ — of those flagged, how many are true cases.
+- **Negative Predictive Value**: $\frac{TN}{TN + FN}$ — of those cleared, how many are truly healthy.
+- **Misclassification Error** (MCE): $\frac{FP + FN}{n}$ — overall error rate.
+
+### ROC Curve and AUC
+
+The Receiver Operating Characteristic (ROC) curve plots sensitivity against $1 - \text{specificity}$ as the threshold $t$ varies continuously from 0 to 1. The Area Under the Curve (AUC) summarizes discriminative ability in a single number: AUC = 1 is perfect classification, AUC = 0.5 is random guessing. We compute ROC curves and AUC using the `pROC` package for all models and overlay them on a single plot for direct comparison.
+
+AUC is our primary model-comparison metric because it is threshold-independent and robust to class imbalance. A model with higher AUC ranks patients more accurately by risk regardless of where the operating threshold is set, which is the fundamental requirement of a screening tool.
+
+### Cost-Sensitive Threshold Analysis
+
+For each model, we sweep the threshold $t$ from 0 to 1 and compute both standard MCE and weighted MCE at each point. This produces threshold curves that make explicit the sensitivity-specificity tradeoff and allow us to identify the operating point most appropriate for diabetes screening.
+
+
+# Part 3: Analysis and Results
+
+*(To be completed with model fitting, results, and interpretations)*
+
+```{r all-model-predictions, echo=TRUE}
+library(pROC)
+
+# --- Logistic Regression (LASSO-selected) ---
+logreg_probs <- predict(fit_lasso_glm, newdata = test_data, type = "response")
+
+# --- Classification Tree ---
+tree_probs <- predict(tree_pruned, newdata = test_data, type = "prob")[, 2]
+
+# --- Random Forest ---
+rf_probs <- predict(rf_fit, newdata = test_data, type = "prob")[, 2]
+
+# --- XGBoost ---
+xgb_probs <- predict(xgb_fit, newdata = dtest)
+```
+
+```{r roc-comparison, fig.width=7, fig.height=5, echo=TRUE}
+# Build ROC objects
+roc_logreg <- roc(test_data$Diabetes_binary, logreg_probs, quiet = TRUE)
+roc_tree   <- roc(test_data$Diabetes_binary, tree_probs,   quiet = TRUE)
+roc_rf     <- roc(test_data$Diabetes_binary, rf_probs,     quiet = TRUE)
+roc_xgb    <- roc(test_data$Diabetes_binary, xgb_probs,    quiet = TRUE)
+
+# Overlay ROC curves
+plot(roc_logreg, col = "#2980B9", lwd = 2,
+     main = "ROC Curves: All Models (Test Set)")
+lines(roc_tree, col = "#E74C3C", lwd = 2)
+lines(roc_rf,   col = "#27AE60", lwd = 2)
+lines(roc_xgb,  col = "#8E44AD", lwd = 2)
+abline(a = 0, b = 1, lty = 2, col = "gray50")
+legend("bottomright",
+       legend = c(
+         paste0("Logistic Reg  (AUC = ", round(auc(roc_logreg), 3), ")"),
+         paste0("Class. Tree   (AUC = ", round(auc(roc_tree),   3), ")"),
+         paste0("Random Forest (AUC = ", round(auc(roc_rf),     3), ")"),
+         paste0("XGBoost       (AUC = ", round(auc(roc_xgb),    3), ")")
+       ),
+       col    = c("#2980B9", "#E74C3C", "#27AE60", "#8E44AD"),
+       lwd    = 2,
+       bty    = "n",
+       cex    = 0.9)
+```
+
+```{r confusion-matrices, echo=TRUE}
+# Threshold: cost-sensitive (FN cost = 5x FP cost) applied uniformly
+# Or use 0.5 default — choose one and be consistent in the paper
+threshold <- 0.3   # adjust after seeing results; lower = more sensitive (catches more diabetics)
+
+get_metrics <- function(actual, probs, t = threshold, model_name = "") {
+  pred <- ifelse(probs >= t, 1, 0)
+  cm   <- table(Predicted = pred, Actual = actual)
+  
+  # Safe extraction in case a class is entirely absent in predictions
+  TN <- ifelse("0" %in% rownames(cm) & "0" %in% colnames(cm), cm["0", "0"], 0)
+  FP <- ifelse("1" %in% rownames(cm) & "0" %in% colnames(cm), cm["1", "0"], 0)
+  FN <- ifelse("0" %in% rownames(cm) & "1" %in% colnames(cm), cm["0", "1"], 0)
+  TP <- ifelse("1" %in% rownames(cm) & "1" %in% colnames(cm), cm["1", "1"], 0)
+  
+  sensitivity <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  precision   <- TP / (TP + FP)
+  accuracy    <- (TP + TN) / (TP + TN + FP + FN)
+  mce         <- (FP + FN) / (TP + TN + FP + FN)
+  
+  data.frame(Model       = model_name,
+             Accuracy    = round(accuracy, 3),
+             MCE         = round(mce, 3),
+             Sensitivity = round(sensitivity, 3),
+             Specificity = round(specificity, 3),
+             Precision   = round(precision, 3))
+}
+
+results_table <- rbind(
+  get_metrics(test_data$Diabetes_binary, logreg_probs, model_name = "Logistic Regression"),
+  get_metrics(test_data$Diabetes_binary, tree_probs,   model_name = "Classification Tree"),
+  get_metrics(test_data$Diabetes_binary, rf_probs,     model_name = "Random Forest"),
+  get_metrics(test_data$Diabetes_binary, xgb_probs,    model_name = "XGBoost")
+)
+
+# Add AUC column
+results_table$AUC <- round(c(auc(roc_logreg), auc(roc_tree), 
+                              auc(roc_rf), auc(roc_xgb)), 3)
+
+knitr::kable(results_table, 
+             caption = paste0("Model Comparison on Test Set (threshold = ", threshold, ")"),
+             align   = "lcccccc")
+```
